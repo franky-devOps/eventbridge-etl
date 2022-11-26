@@ -1,10 +1,47 @@
-import { config, EventBridge } from 'aws-sdk';
-
-config.region = process.env.AWS_REGION || 'us-east-1';
-const eventbridge = new EventBridge();
+import {
+  EventBridgeClient,
+  PutEventsCommandInput,
+  PutEventsCommand,
+} from '@aws-sdk/client-eventbridge';
 
 type TransformedData = {
   [key: string]: string;
+};
+
+// Static initialization
+const eventbridgeClient = new EventBridgeClient({
+  region: process.env.AWS_REGION,
+});
+
+const putEventAsTransformed = async (transformedObject: TransformedData) => {
+  try {
+    // Building our data transformed event for EventBridge
+    const putEventsCommandInput: PutEventsCommandInput = {
+      Entries: [
+        {
+          DetailType: 'transform',
+          EventBusName: 'default',
+          Source: 'cdkpatterns.the-eventbridge-etl',
+          Time: new Date(),
+          // Main event body
+          Detail: JSON.stringify({
+            status: 'transformed',
+            data: transformedObject,
+          }),
+        },
+      ],
+    };
+    // Although this handler does not care who subs to the event
+    // It is actually subscribed by the observer lambda
+    const putEventsCommand = new PutEventsCommand(putEventsCommandInput);
+
+    const result = await eventbridgeClient.send(putEventsCommand);
+
+    console.log(result);
+  } catch (error) {
+    console.log(error);
+    throw new Error('Failed to put event to event bridge');
+  }
 };
 
 export const handler = async (event: any) => {
@@ -23,23 +60,5 @@ export const handler = async (event: any) => {
     transformedObject[header] = rowFieldValue;
   }
 
-  // Building our transform event for EventBridge
-  const params = {
-    Entries: [
-      {
-        DetailType: 'transform',
-        EventBusName: 'default',
-        Source: 'cdkpatterns.the-eventbridge-etl',
-        Time: new Date(),
-        // Main event body
-        Detail: JSON.stringify({
-          status: 'transformed',
-          data: transformedObject,
-        }),
-      },
-    ],
-  };
-
-  const result = await eventbridge.putEvents(params).promise();
-  console.log(result);
+  await putEventAsTransformed(transformedObject);
 };

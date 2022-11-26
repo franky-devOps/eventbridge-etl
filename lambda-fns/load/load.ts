@@ -1,15 +1,67 @@
-import { DynamoDB, EventBridge, config } from 'aws-sdk';
+import {
+  EventBridgeClient,
+  PutEventsCommandInput,
+  PutEventsCommand,
+} from '@aws-sdk/client-eventbridge';
+import {
+  DynamoDBClient,
+  PutItemCommand,
+  PutItemCommandInput,
+} from '@aws-sdk/client-dynamodb';
 
-config.region = process.env.AWS_REGION || 'us-east-1';
-const eventbridge = new EventBridge();
+const eventbridgeClient = new EventBridgeClient({
+  region: process.env.AWS_REGION,
+});
+
+const dynamoDbClient = new DynamoDBClient({
+  region: process.env.AWS_REGION,
+});
+
+const putItemToDynamoTable = async (putItemCommand: PutItemCommand) => {
+  try {
+    const result = await dynamoDbClient.send(putItemCommand);
+    console.log(result);
+  } catch (error) {
+    console.log(error);
+    throw new Error('Failed to put item to dynamoDB table');
+  }
+};
+
+const putEventAsLoaded = async (putItemCommandInput: any) => {
+  try {
+    // Building our data loaded event for EventBridge
+    const putEventsCommandInput: PutEventsCommandInput = {
+      Entries: [
+        {
+          DetailType: 'data-loaded',
+          EventBusName: 'default',
+          Source: 'cdkpatterns.the-eventbridge-etl',
+          Time: new Date(),
+          // Main event body
+          Detail: JSON.stringify({
+            status: 'success',
+            data: putItemCommandInput,
+          }),
+        },
+      ],
+    };
+    // Although this handler does not care who subs to the event
+    // It is actually subscribed by the observer lambda
+    const putEventsCommand = new PutEventsCommand(putEventsCommandInput);
+
+    const result = await eventbridgeClient.send(putEventsCommand);
+
+    console.log(result);
+  } catch (error) {
+    console.log(error);
+    throw new Error('Failed to put event to event bridge');
+  }
+};
 
 export const handler = async (event: any) => {
   console.log(JSON.stringify(event, null, 2));
 
-  // Create the DynamoDB service object
-  const dynamoDb = new DynamoDB({ apiVersion: '2012-08-10' });
-
-  const putItemParams: DynamoDB.PutItemInput = {
+  const putItemCommandInput: PutItemCommandInput = {
     TableName: process.env.TABLE_NAME as string,
     Item: {
       id: { S: event.detail.data.ID },
@@ -21,32 +73,9 @@ export const handler = async (event: any) => {
   };
 
   // Call DynamoDB to add the item to the table
-  let result = await dynamoDb.putItem(putItemParams).promise();
+  // let result = await dynamoDb.putItem(putItemParams).promise();
+  const putItemCommand = new PutItemCommand(putItemCommandInput);
+  await putItemToDynamoTable(putItemCommand);
 
-  console.log(result);
-
-  // Building our data loaded event for EventBridge
-  var eventBridgeParams = {
-    Entries: [
-      {
-        DetailType: 'data-loaded',
-        EventBusName: 'default',
-        Source: 'cdkpatterns.the-eventbridge-etl',
-        Time: new Date(),
-        // Main event body
-        Detail: JSON.stringify({
-          status: 'success',
-          data: putItemParams,
-        }),
-      },
-    ],
-  };
-
-  const ebResult = await eventbridge
-    .putEvents(eventBridgeParams)
-    .promise()
-    .catch((error: any) => {
-      throw new Error(error);
-    });
-  console.log(ebResult);
+  await putEventAsLoaded(putItemCommandInput);
 };

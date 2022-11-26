@@ -1,8 +1,61 @@
-import { ECS, config, EventBridge } from 'aws-sdk';
+import {
+  EventBridgeClient,
+  PutEventsCommandInput,
+  PutEventsCommand,
+} from '@aws-sdk/client-eventbridge';
+import {
+  ECSClient,
+  RunTaskCommand,
+  RunTaskCommandInput,
+} from '@aws-sdk/client-ecs';
 import { SQSEvent } from 'aws-lambda';
 
-config.region = process.env.AWS_REGION || 'us-east-1';
-const eventbridge = new EventBridge();
+const eventbridgeClient = new EventBridgeClient({
+  region: process.env.AWS_REGION,
+});
+
+const runStandaloneEcsTask = async (runTaskCommand: RunTaskCommand) => {
+  try {
+    const ecsClient = new ECSClient({ region: process.env.AWS_REGION });
+    const result = await ecsClient.send(runTaskCommand);
+
+    return result;
+  } catch (error) {
+    console.log(error);
+    throw new Error('Failed to run standalone ecs task');
+  }
+};
+
+const putEventAsEcsStarted = async (ecsResponse: any) => {
+  try {
+    // Building our ecs started event for EventBridge
+    const putEventsCommandInput: PutEventsCommandInput = {
+      Entries: [
+        {
+          DetailType: 'ecs-started',
+          EventBusName: 'default',
+          Source: 'cdkpatterns.the-eventbridge-etl',
+          Time: new Date(),
+          // Main event body
+          Detail: JSON.stringify({
+            status: 'success',
+            data: ecsResponse,
+          }),
+        },
+      ],
+    };
+    // Although this handler does not care who subs to the event
+    // It is actually subscribed by the observer lambda
+    const putEventsCommand = new PutEventsCommand(putEventsCommandInput);
+
+    const result = await eventbridgeClient.send(putEventsCommand);
+
+    console.log(result);
+  } catch (error) {
+    console.log(error);
+    throw new Error('Failed to put event to event bridge');
+  }
+};
 
 const validateEnvVariables = (
   clusterName: string | undefined,
@@ -30,8 +83,6 @@ const validateEnvVariables = (
 };
 
 export const handler = async (event: SQSEvent): Promise<any> => {
-  var ecs = new ECS({ apiVersion: '2014-11-13' });
-
   console.log('request:', JSON.stringify(event, undefined, 2));
 
   //Extract variables from environment
@@ -47,7 +98,7 @@ export const handler = async (event: SQSEvent): Promise<any> => {
   console.log('Task Definition - ' + taskDefinition);
   console.log('SubNets - ' + subNets);
 
-  var runeTaskRequestParams: ECS.Types.RunTaskRequest = {
+  const runTaskCommandInput: RunTaskCommandInput = {
     cluster: clusterName,
     launchType: 'FARGATE',
     taskDefinition: taskDefinition,
@@ -72,11 +123,11 @@ export const handler = async (event: SQSEvent): Promise<any> => {
 
     let s3eventRecords = payload.Records;
 
-    console.log('records ' + s3eventRecords);
+    console.log('records ' + JSON.stringify(s3eventRecords));
 
     for (let idx in s3eventRecords) {
       let s3event = s3eventRecords[idx];
-      console.log('s3 event ' + s3event);
+      console.log('s3 event ' + JSON.stringify(s3event));
 
       //Extract variables from event
       const objectKey = s3event?.s3?.object?.key;
@@ -93,7 +144,7 @@ export const handler = async (event: SQSEvent): Promise<any> => {
         typeof bucketName != 'undefined' &&
         typeof bucketARN != 'undefined'
       ) {
-        runeTaskRequestParams.overrides = {
+        runTaskCommandInput.overrides = {
           containerOverrides: [
             {
               environment: [
@@ -113,40 +164,12 @@ export const handler = async (event: SQSEvent): Promise<any> => {
 
         // Run standalone task without ECS service schedule
         // https://docs.aws.amazon.com/AmazonECS/latest/developerguide/ecs_run_task.html
-        let ecsResponse = await ecs
-          .runTask(runeTaskRequestParams)
-          .promise()
-          .catch((error: any) => {
-            throw new Error(error);
-          });
+        const runTaskCommand = new RunTaskCommand(runTaskCommandInput);
+        const ecsResponse = await runStandaloneEcsTask(runTaskCommand);
+
+        await putEventAsEcsStarted(ecsResponse);
 
         console.log(ecsResponse);
-
-        // Building our ecs started event for EventBridge
-        var eventBridgeParams = {
-          Entries: [
-            {
-              DetailType: 'ecs-started',
-              EventBusName: 'default',
-              Source: 'cdkpatterns.the-eventbridge-etl',
-              Time: new Date(),
-              // Main event body
-              Detail: JSON.stringify({
-                status: 'success',
-                data: ecsResponse,
-              }),
-            },
-          ],
-        };
-
-        // Notify observer lambda
-        const result = await eventbridge
-          .putEvents(eventBridgeParams)
-          .promise()
-          .catch((error: any) => {
-            throw new Error(error);
-          });
-        console.log(result);
       } else {
         console.log('not an s3 event...');
       }
