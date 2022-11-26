@@ -13,7 +13,7 @@ import * as events from 'aws-cdk-lib/aws-events';
 import * as events_targets from 'aws-cdk-lib/aws-events-targets';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 
-export class TheEventbridgeEtlStack extends Stack {
+export class EventbridgeEtlStack extends Stack {
   constructor(scope: Construct, id: string, props?: StackProps) {
     super(scope, id, props);
 
@@ -29,6 +29,7 @@ export class TheEventbridgeEtlStack extends Stack {
      * This is where our transformed data ends up
      */
     const table = new dynamodb.Table(this, 'TransformedData', {
+      tableName: 'eventbridge-etl-address',
       partitionKey: { name: 'id', type: dynamodb.AttributeType.STRING },
     });
 
@@ -36,18 +37,22 @@ export class TheEventbridgeEtlStack extends Stack {
      * S3 Landing Bucket
      * This is where the user uploads the file to be transformed
      */
-    let sourceBucket = new s3.Bucket(this, 'LandingBucket', {});
+    const landingBucket = new s3.Bucket(this, 'LandingBucket', {});
 
     /**
      * Queue that listens for S3 Bucket events
      */
-    const queue = new sqs.Queue(this, 'newObjectInLandingBucketEventQueue', {
-      visibilityTimeout: Duration.seconds(300),
-    });
+    const landingBucketQueue = new sqs.Queue(
+      this,
+      'newObjectInLandingBucketEventQueue',
+      {
+        visibilityTimeout: Duration.seconds(300),
+      }
+    );
 
-    sourceBucket.addEventNotification(
+    landingBucket.addEventNotification(
       s3.EventType.OBJECT_CREATED,
-      new s3n.SqsDestination(queue)
+      new s3n.SqsDestination(landingBucketQueue)
     );
 
     /**
@@ -73,7 +78,7 @@ export class TheEventbridgeEtlStack extends Stack {
     });
 
     const logging = new ecs.AwsLogDriver({
-      streamPrefix: 'TheEventBridgeETL',
+      streamPrefix: 'EventBridgeETL',
       logRetention: logs.RetentionDays.ONE_WEEK,
     });
 
@@ -93,14 +98,15 @@ export class TheEventbridgeEtlStack extends Stack {
     // We need to give our fargate container permission to put events on our EventBridge
     taskDefinition.addToTaskRolePolicy(eventbridgePutPolicy);
     // Grant fargate container access to the object that was uploaded to s3
-    sourceBucket.grantRead(taskDefinition.taskRole);
+    landingBucket.grantRead(taskDefinition.taskRole);
 
     let container = taskDefinition.addContainer('AppContainer', {
       image: ecs.ContainerImage.fromAsset('container/s3DataExtractionTask'),
       logging,
       environment: {
         // clear text, not for sensitive data
-        S3_BUCKET_NAME: sourceBucket.bucketName,
+        // Will be overriden in the extract Lambda function
+        S3_BUCKET_NAME: landingBucket.bucketName,
         S3_OBJECT_KEY: '',
       },
     });
@@ -121,7 +127,7 @@ export class TheEventbridgeEtlStack extends Stack {
      */
     // defines an AWS Lambda resource to trigger our fargate ecs task
     const extractLambda = new lambda.Function(this, 'extractLambdaHandler', {
-      runtime: lambda.Runtime.NODEJS_12_X,
+      runtime: lambda.Runtime.NODEJS_18_X,
       code: lambda.Code.fromAsset('lambda-fns/extract'),
       handler: 's3SqsEventConsumer.handler',
       reservedConcurrentExecutions: LAMBDA_THROTTLE_SIZE,
@@ -134,8 +140,9 @@ export class TheEventbridgeEtlStack extends Stack {
         CONTAINER_NAME: container.containerName,
       },
     });
-    queue.grantConsumeMessages(extractLambda);
-    extractLambda.addEventSource(new SqsEventSource(queue, {}));
+    // Configure extract lambda to have permission to consume SQS message
+    landingBucketQueue.grantConsumeMessages(extractLambda);
+    extractLambda.addEventSource(new SqsEventSource(landingBucketQueue, {}));
     extractLambda.addToRolePolicy(eventbridgePutPolicy);
 
     const runTaskPolicyStatement = new iam.PolicyStatement({
@@ -145,6 +152,7 @@ export class TheEventbridgeEtlStack extends Stack {
     });
     extractLambda.addToRolePolicy(runTaskPolicyStatement);
 
+    // Allow the extract lambda to pass roles to the ecs task
     const taskExecutionRolePolicyStatement = new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,
       actions: ['iam:PassRole'],
@@ -163,10 +171,11 @@ export class TheEventbridgeEtlStack extends Stack {
       this,
       'TransformLambdaHandler',
       {
-        runtime: lambda.Runtime.NODEJS_12_X,
+        runtime: lambda.Runtime.NODEJS_18_X,
         code: lambda.Code.fromAsset('lambda-fns/transform'),
         handler: 'transform.handler',
         reservedConcurrentExecutions: LAMBDA_THROTTLE_SIZE,
+        // It should be a very fast execution
         timeout: Duration.seconds(3),
       }
     );
@@ -191,9 +200,10 @@ export class TheEventbridgeEtlStack extends Stack {
      */
     // load the transformed data in dynamodb
     const loadLambda = new lambda.Function(this, 'LoadLambdaHandler', {
-      runtime: lambda.Runtime.NODEJS_12_X,
+      runtime: lambda.Runtime.NODEJS_18_X,
       code: lambda.Code.fromAsset('lambda-fns/load'),
       handler: 'load.handler',
+      // It should be a very fast execution
       timeout: Duration.seconds(3),
       reservedConcurrentExecutions: LAMBDA_THROTTLE_SIZE,
       environment: {
@@ -222,9 +232,10 @@ export class TheEventbridgeEtlStack extends Stack {
      */
     // Watch for all cdkpatterns.the-eventbridge-etl events and log them centrally
     const observeLambda = new lambda.Function(this, 'ObserveLambdaHandler', {
-      runtime: lambda.Runtime.NODEJS_12_X,
+      runtime: lambda.Runtime.NODEJS_18_X,
       code: lambda.Code.fromAsset('lambda-fns/observe'),
       handler: 'observe.handler',
+      // It should be a very fast execution
       timeout: Duration.seconds(3),
     });
 

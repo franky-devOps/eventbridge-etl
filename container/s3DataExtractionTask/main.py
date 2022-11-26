@@ -1,5 +1,4 @@
 import boto3
-import time
 import os
 import csv
 from datetime import datetime
@@ -23,6 +22,7 @@ def main():
     local_file = '/tmp/data.tsv'
 
     s3_resource = boto3.resource('s3')
+    # Download file to container's memory
     s3_resource.Object(data_s3_bucket_name, data_s3_object_key).download_file(local_file)
 
     print('SUCCESS: data file downloaded: ' + local_file)

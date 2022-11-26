@@ -6,9 +6,9 @@ WORKDIR /app
 RUN yum install -y \
     python3-pip \
     python3 \
-    python3-setuptools \
- && yum clean all \
- && rm -rf /var/cache/yum
+    python3-setuptools
+RUN yum clean all
+RUN rm -rf /var/cache/yum
 
 # Install app dependencies
 COPY requirements.txt .

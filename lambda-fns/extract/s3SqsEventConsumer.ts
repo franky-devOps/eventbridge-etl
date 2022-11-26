@@ -1,42 +1,53 @@
-// const { ECS } = require('aws-sdk');
-// const AWS = require('aws-sdk');
-import AWS, { ECS } from 'aws-sdk';
-import { S3CreateEvent } from 'aws-lambda';
+import { ECS, config, EventBridge } from 'aws-sdk';
+import { SQSEvent } from 'aws-lambda';
 
-AWS.config.region = process.env.AWS_REGION || 'us-east-1';
-const eventbridge = new AWS.EventBridge();
+config.region = process.env.AWS_REGION || 'us-east-1';
+const eventbridge = new EventBridge();
 
-export const handler = async (event: S3CreateEvent): Promise<any> => {
+const validateEnvVariables = (
+  clusterName: string | undefined,
+  taskDefinition: string | undefined,
+  subNets: string | undefined,
+  containerName: string | undefined
+) => {
+  if (typeof clusterName == 'undefined') {
+    throw new Error('Cluster Name is not defined');
+  }
+
+  if (typeof taskDefinition == 'undefined') {
+    throw new Error('Task Definition is not defined');
+  }
+
+  if (typeof subNets == 'undefined') {
+    throw new Error('SubNets are not defined');
+  }
+
+  if (typeof containerName == 'undefined') {
+    throw new Error('Container Name is not defined');
+  }
+
+  return { clusterName, taskDefinition, subNets, containerName };
+};
+
+export const handler = async (event: SQSEvent): Promise<any> => {
   var ecs = new ECS({ apiVersion: '2014-11-13' });
 
   console.log('request:', JSON.stringify(event, undefined, 2));
 
   //Extract variables from environment
-  const clusterName = process.env.CLUSTER_NAME;
-  if (typeof clusterName == 'undefined') {
-    throw new Error('Cluster Name is not defined');
-  }
-
-  const taskDefinition = process.env.TASK_DEFINITION;
-  if (typeof taskDefinition == 'undefined') {
-    throw new Error('Task Definition is not defined');
-  }
-
-  const subNets = process.env.SUBNETS;
-  if (typeof subNets == 'undefined') {
-    throw new Error('SubNets are not defined');
-  }
-
-  const containerName = process.env.CONTAINER_NAME;
-  if (typeof containerName == 'undefined') {
-    throw new Error('Container Name is not defined');
-  }
+  const { clusterName, taskDefinition, subNets, containerName } =
+    validateEnvVariables(
+      process.env.CLUSTER_NAME,
+      process.env.TASK_DEFINITION,
+      process.env.SUBNETS,
+      process.env.CONTAINER_NAME
+    );
 
   console.log('Cluster Name - ' + clusterName);
   console.log('Task Definition - ' + taskDefinition);
   console.log('SubNets - ' + subNets);
 
-  var params: any = {
+  var runeTaskRequestParams: ECS.Types.RunTaskRequest = {
     cluster: clusterName,
     launchType: 'FARGATE',
     taskDefinition: taskDefinition,
@@ -53,80 +64,92 @@ export const handler = async (event: S3CreateEvent): Promise<any> => {
   /**
    * An event can contain multiple records to process. i.e. the user could have uploaded 2 files.
    */
-  let idx = 0;
-  for (let record of event.Records) {
-    console.log('processing s3 event record ' + record);
 
-    //Extract variables from event
-    const objectKey = record?.s3?.object?.key;
-    const bucketName = record?.s3?.bucket?.name;
-    const bucketARN = record?.s3?.bucket?.arn;
+  const records = event.Records;
+  for (let index in records) {
+    let payload = JSON.parse(records[index].body);
+    console.log('processing s3 events ' + payload);
 
-    console.log('Object Key - ' + objectKey);
-    console.log('Bucket Name - ' + bucketName);
-    console.log('Bucket ARN - ' + bucketARN);
+    let s3eventRecords = payload.Records;
 
-    if (
-      typeof objectKey != 'undefined' &&
-      typeof bucketName != 'undefined' &&
-      typeof bucketARN != 'undefined'
-    ) {
-      params.overrides = {
-        containerOverrides: [
-          {
-            environment: [
-              {
-                name: 'S3_BUCKET_NAME',
-                value: bucketName,
-              },
-              {
-                name: 'S3_OBJECT_KEY',
-                value: objectKey,
-              },
-            ],
-            name: containerName,
-          },
-        ],
-      };
+    console.log('records ' + s3eventRecords);
 
-      let ecsResponse = await ecs
-        .runTask(params)
-        .promise()
-        .catch((error: any) => {
-          throw new Error(error);
-        });
+    for (let idx in s3eventRecords) {
+      let s3event = s3eventRecords[idx];
+      console.log('s3 event ' + s3event);
 
-      console.log(ecsResponse);
+      //Extract variables from event
+      const objectKey = s3event?.s3?.object?.key;
+      const bucketName = s3event?.s3?.bucket?.name;
+      const bucketARN = s3event?.s3?.bucket?.arn;
 
-      // Building our ecs started event for EventBridge
-      var eventBridgeParams = {
-        Entries: [
-          {
-            DetailType: 'ecs-started',
-            EventBusName: 'default',
-            Source: 'cdkpatterns.the-eventbridge-etl',
-            Time: new Date(),
-            // Main event body
-            Detail: JSON.stringify({
-              status: 'success',
-              data: ecsResponse,
-            }),
-          },
-        ],
-      };
+      console.log('Object Key - ' + objectKey);
+      console.log('Bucket Name - ' + bucketName);
+      console.log('Bucket ARN - ' + bucketARN);
 
-      console.log(eventBridgeParams);
+      // Overrwrite standalone ecs task with required environment variables
+      if (
+        typeof objectKey != 'undefined' &&
+        typeof bucketName != 'undefined' &&
+        typeof bucketARN != 'undefined'
+      ) {
+        runeTaskRequestParams.overrides = {
+          containerOverrides: [
+            {
+              environment: [
+                {
+                  name: 'S3_BUCKET_NAME',
+                  value: bucketName,
+                },
+                {
+                  name: 'S3_OBJECT_KEY',
+                  value: objectKey,
+                },
+              ],
+              name: containerName,
+            },
+          ],
+        };
 
-      // const result = await eventbridge
-      //   .putEvents(eventBridgeParams)
-      //   .promise()
-      //   .catch((error: any) => {
-      //     throw new Error(error);
-      //   });
-      // console.log(result);
-    } else {
-      console.log('not an s3 event...');
+        // Run standalone task without ECS service schedule
+        // https://docs.aws.amazon.com/AmazonECS/latest/developerguide/ecs_run_task.html
+        let ecsResponse = await ecs
+          .runTask(runeTaskRequestParams)
+          .promise()
+          .catch((error: any) => {
+            throw new Error(error);
+          });
+
+        console.log(ecsResponse);
+
+        // Building our ecs started event for EventBridge
+        var eventBridgeParams = {
+          Entries: [
+            {
+              DetailType: 'ecs-started',
+              EventBusName: 'default',
+              Source: 'cdkpatterns.the-eventbridge-etl',
+              Time: new Date(),
+              // Main event body
+              Detail: JSON.stringify({
+                status: 'success',
+                data: ecsResponse,
+              }),
+            },
+          ],
+        };
+
+        // Notify observer lambda
+        const result = await eventbridge
+          .putEvents(eventBridgeParams)
+          .promise()
+          .catch((error: any) => {
+            throw new Error(error);
+          });
+        console.log(result);
+      } else {
+        console.log('not an s3 event...');
+      }
     }
-    idx++;
   }
 };
