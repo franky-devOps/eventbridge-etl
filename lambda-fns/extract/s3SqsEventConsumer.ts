@@ -107,7 +107,8 @@ export const handler = async (event: SQSEvent): Promise<any> => {
     networkConfiguration: {
       awsvpcConfiguration: {
         subnets: JSON.parse(subNets),
-        assignPublicIp: 'DISABLED',
+        // assignPublicIp: 'DISABLED',
+        assignPublicIp: 'ENABLED',
       },
     },
   };

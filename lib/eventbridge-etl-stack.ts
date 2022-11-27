@@ -73,8 +73,12 @@ export class EventbridgeEtlStack extends Stack {
      * download the whole file. Lambda has limitations on runtime and
      * memory/storage
      */
-    const vpc = new ec2.Vpc(this, 'Vpc', {
-      maxAzs: 2, // Default is all AZs in the region
+    // const vpc = new ec2.Vpc(this, 'Vpc', {
+    //   maxAzs: 2, // Default is all AZs in the region
+    // });
+    const vpc = ec2.Vpc.fromLookup(this, 'DefaultVpc', {
+      isDefault: true,
+      vpcId: 'vpc-0732d0a34e98bf396',
     });
 
     const logging = new ecs.AwsLogDriver({
@@ -135,7 +139,7 @@ export class EventbridgeEtlStack extends Stack {
         CLUSTER_NAME: cluster.clusterName,
         TASK_DEFINITION: taskDefinition.taskDefinitionArn,
         SUBNETS: JSON.stringify(
-          Array.from(vpc.privateSubnets, (x) => x.subnetId)
+          Array.from(vpc.publicSubnets, (x) => x.subnetId)
         ),
         CONTAINER_NAME: container.containerName,
       },

@@ -5,6 +5,10 @@ import { EventbridgeEtlStack } from '../lib/eventbridge-etl-stack';
 
 const app = new cdk.App();
 new EventbridgeEtlStack(app, 'EventbridgeEtlStack', {
+  env: {
+    account: '908298817993',
+    region: 'ap-southeast-2',
+  },
   /* If you don't specify 'env', this stack will be environment-agnostic.
    * Account/Region-dependent features and context lookups will not work,
    * but a single synthesized template can be deployed anywhere. */
