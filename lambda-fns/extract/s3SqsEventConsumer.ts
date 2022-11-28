@@ -9,6 +9,7 @@ import {
   RunTaskCommandInput,
 } from '@aws-sdk/client-ecs';
 import { SQSEvent } from 'aws-lambda';
+import * as AWSXray from 'aws-xray-sdk';
 
 const eventbridgeClient = new EventBridgeClient({
   region: process.env.AWS_REGION,
@@ -166,7 +167,21 @@ export const handler = async (event: SQSEvent): Promise<any> => {
         // Run standalone task without ECS service schedule
         // https://docs.aws.amazon.com/AmazonECS/latest/developerguide/ecs_run_task.html
         const runTaskCommand = new RunTaskCommand(runTaskCommandInput);
-        const ecsResponse = await runStandaloneEcsTask(runTaskCommand);
+
+        let ecsResponse;
+        AWSXray.captureAsyncFunc(
+          'runStandaloneEcsTask',
+          async function (subsegment) {
+            console.log(
+              '============== runStandaloneEcsTask instrument!! =============='
+            );
+            ecsResponse = await runStandaloneEcsTask(runTaskCommand);
+            subsegment?.addAnnotation('BucketArn', s3event?.s3?.bucket?.arn);
+            subsegment?.addMetadata('EcsResponse', ecsResponse);
+
+            subsegment?.close();
+          }
+        );
 
         await putEventAsEcsStarted(ecsResponse);
 

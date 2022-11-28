@@ -5,6 +5,7 @@ import * as s3n from 'aws-cdk-lib/aws-s3-notifications';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
 import { SqsEventSource } from 'aws-cdk-lib/aws-lambda-event-sources';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
+import * as nodejsLambda from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as ecs from 'aws-cdk-lib/aws-ecs';
 import * as logs from 'aws-cdk-lib/aws-logs';
@@ -130,20 +131,29 @@ export class EventbridgeEtlStack extends Stack {
      * Extract
      */
     // defines an AWS Lambda resource to trigger our fargate ecs task
-    const extractLambda = new lambda.Function(this, 'extractLambdaHandler', {
-      runtime: lambda.Runtime.NODEJS_18_X,
-      code: lambda.Code.fromAsset('lambda-fns/extract'),
-      handler: 's3SqsEventConsumer.handler',
-      reservedConcurrentExecutions: LAMBDA_THROTTLE_SIZE,
-      environment: {
-        CLUSTER_NAME: cluster.clusterName,
-        TASK_DEFINITION: taskDefinition.taskDefinitionArn,
-        SUBNETS: JSON.stringify(
-          Array.from(vpc.publicSubnets, (x) => x.subnetId)
-        ),
-        CONTAINER_NAME: container.containerName,
-      },
-    });
+    // https://docs.aws.amazon.com/cdk/api/v2/docs/aws-cdk-lib.aws_lambda_nodejs-readme.html#externals
+    const extractLambda = new nodejsLambda.NodejsFunction(
+      this,
+      'extractLambdaHandler',
+      {
+        runtime: lambda.Runtime.NODEJS_18_X,
+        entry: './lambda-fns/extract/s3SqsEventConsumer.ts',
+        handler: 'handler',
+        reservedConcurrentExecutions: LAMBDA_THROTTLE_SIZE,
+        environment: {
+          CLUSTER_NAME: cluster.clusterName,
+          TASK_DEFINITION: taskDefinition.taskDefinitionArn,
+          SUBNETS: JSON.stringify(
+            Array.from(vpc.publicSubnets, (x) => x.subnetId)
+          ),
+          CONTAINER_NAME: container.containerName,
+        },
+        tracing: lambda.Tracing.ACTIVE,
+        bundling: {
+          externalModules: ['aws-sdk'],
+        },
+      }
+    );
     // Configure extract lambda to have permission to consume SQS message
     landingBucketQueue.grantConsumeMessages(extractLambda);
     extractLambda.addEventSource(new SqsEventSource(landingBucketQueue, {}));
@@ -171,16 +181,20 @@ export class EventbridgeEtlStack extends Stack {
      * Transform
      */
     // defines a lambda to transform the data that was extracted from s3
-    const transformLambda = new lambda.Function(
+    const transformLambda = new nodejsLambda.NodejsFunction(
       this,
       'TransformLambdaHandler',
       {
         runtime: lambda.Runtime.NODEJS_18_X,
-        code: lambda.Code.fromAsset('lambda-fns/transform'),
-        handler: 'transform.handler',
+        entry: './lambda-fns/transform/transform.ts',
+        handler: 'handler',
         reservedConcurrentExecutions: LAMBDA_THROTTLE_SIZE,
         // It should be a very fast execution
         timeout: Duration.seconds(3),
+        tracing: lambda.Tracing.ACTIVE,
+        bundling: {
+          externalModules: ['aws-sdk'],
+        },
       }
     );
     transformLambda.addToRolePolicy(eventbridgePutPolicy);
@@ -203,17 +217,25 @@ export class EventbridgeEtlStack extends Stack {
      * Load
      */
     // load the transformed data in dynamodb
-    const loadLambda = new lambda.Function(this, 'LoadLambdaHandler', {
-      runtime: lambda.Runtime.NODEJS_18_X,
-      code: lambda.Code.fromAsset('lambda-fns/load'),
-      handler: 'load.handler',
-      // It should be a very fast execution
-      timeout: Duration.seconds(3),
-      reservedConcurrentExecutions: LAMBDA_THROTTLE_SIZE,
-      environment: {
-        TABLE_NAME: table.tableName,
-      },
-    });
+    const loadLambda = new nodejsLambda.NodejsFunction(
+      this,
+      'LoadLambdaHandler',
+      {
+        runtime: lambda.Runtime.NODEJS_18_X,
+        entry: './lambda-fns/load/load.ts',
+        handler: 'handler',
+        // It should be a very fast execution
+        timeout: Duration.seconds(3),
+        reservedConcurrentExecutions: LAMBDA_THROTTLE_SIZE,
+        environment: {
+          TABLE_NAME: table.tableName,
+        },
+        tracing: lambda.Tracing.ACTIVE,
+        bundling: {
+          externalModules: ['aws-sdk'],
+        },
+      }
+    );
     loadLambda.addToRolePolicy(eventbridgePutPolicy);
     table.grantReadWriteData(loadLambda);
 
@@ -235,13 +257,20 @@ export class EventbridgeEtlStack extends Stack {
      * Observe
      */
     // Watch for all cdkpatterns.the-eventbridge-etl events and log them centrally
-    const observeLambda = new lambda.Function(this, 'ObserveLambdaHandler', {
-      runtime: lambda.Runtime.NODEJS_18_X,
-      code: lambda.Code.fromAsset('lambda-fns/observe'),
-      handler: 'observe.handler',
-      // It should be a very fast execution
-      timeout: Duration.seconds(3),
-    });
+    const observeLambda = new nodejsLambda.NodejsFunction(
+      this,
+      'ObserveLambdaHandler',
+      {
+        runtime: lambda.Runtime.NODEJS_18_X,
+        entry: './lambda-fns/observe/observe.ts',
+        handler: 'handler',
+        // It should be a very fast execution
+        timeout: Duration.seconds(3),
+        bundling: {
+          externalModules: ['aws-sdk'],
+        },
+      }
+    );
 
     // Create EventBridge rule to route events
     const observeRule = new events.Rule(this, 'observeRule', {
